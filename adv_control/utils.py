@@ -227,7 +227,8 @@ class TimestepKeyframe:
                  null_latent_kf_strength: float = 0.0,
                  inherit_missing: bool = True,
                  guarantee_steps: int = 1,
-                 mask_hint_orig: Tensor = None) -> None:
+                 mask_hint_orig: Tensor = None,
+                 cn_extras: dict = None) -> None:
         self.start_percent = float(start_percent)
         self.start_t = 999999999.9
         self.strength = strength
@@ -237,6 +238,7 @@ class TimestepKeyframe:
         self.inherit_missing = inherit_missing
         self.guarantee_steps = guarantee_steps
         self.mask_hint_orig = mask_hint_orig
+        self.cn_extras = cn_extras if cn_extras is not None else {}
 
     def has_control_weights(self):
         return self.control_weights is not None
@@ -246,6 +248,12 @@ class TimestepKeyframe:
     
     def has_mask_hint(self):
         return self.mask_hint_orig is not None
+    
+    def has_cn_extras(self):
+        return self.cn_extras is not None and len(self.cn_extras) > 0
+    
+    def has_control_image(self):
+        return self.has_cn_extras() and 'image' in self.cn_extras
     
     def get_effective_guarantee_steps(self, max_sigma: torch.Tensor):
         '''If keyframe starts before current sampling range (max_sigma), treat as 0.'''
@@ -493,6 +501,7 @@ class AdvancedControlBase:
         self.mask_cond_hint = None
         self.tk_mask_cond_hint_original = None
         self.tk_mask_cond_hint = None
+        self.tk_cn_extras = None
         self.weight_mask_cond_hint = None
         # actual index values
         self.sub_idxs = None
@@ -594,6 +603,16 @@ class AdvancedControlBase:
                         elif not self._current_timestep_keyframe.inherit_missing:
                             del self.tk_mask_cond_hint_original
                             self.tk_mask_cond_hint_original = None
+                        if self._current_timestep_keyframe.has_cn_extras():
+                            self.tk_cn_extras = self._current_timestep_keyframe.cn_extras
+                            print(f"\n[DEBUG prepare_current_keyframe] Updated tk_cn_extras!")
+                            print(f"  Keyframe index: {i}")
+                            print(f"  cn_extras keys: {list(self.tk_cn_extras.keys())}")
+                            if 'image' in self.tk_cn_extras:
+                                print(f"  Image shape: {self.tk_cn_extras['image'].shape}")
+                        elif not self._current_timestep_keyframe.inherit_missing:
+                            self.tk_cn_extras = None
+                            print(f"\n[DEBUG prepare_current_keyframe] Cleared tk_cn_extras (inherit_missing=False)")
                         # if guarantee_steps greater than zero, stop searching for other keyframes
                         if self._current_timestep_keyframe.get_effective_guarantee_steps(max_sigma) > 0:
                             break
@@ -905,6 +924,7 @@ class AdvancedControlBase:
         if self.tk_mask_cond_hint_original is not None:
             del self.tk_mask_cond_hint_original
             self.tk_mask_cond_hint_original = None
+        self.tk_cn_extras = None
         if self.tk_mask_cond_hint is not None:
             del self.tk_mask_cond_hint
             self.tk_mask_cond_hint = None

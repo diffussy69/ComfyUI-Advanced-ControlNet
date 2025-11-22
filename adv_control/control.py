@@ -47,6 +47,11 @@ class ControlNetAdvanced(ControlNet, AdvancedControlBase):
         return self.sliding_get_control(x_noisy, t, cond, batched_number, transformer_options)
 
     def sliding_get_control(self, x_noisy: Tensor, t, cond, batched_number, transformer_options):
+        # DEBUG: Print every time this is called during generation
+        print(f"\n[DEBUG sliding_get_control] Called! t={t}")
+        print(f"  _current_timestep_index: {getattr(self, '_current_timestep_index', 'NOT SET')}")
+        print(f"  _current_timestep_keyframe: {getattr(self, '_current_timestep_keyframe', 'NOT SET')}")
+        
         control_prev = None
         if self.previous_controlnet is not None:
             control_prev = self.previous_controlnet.get_control(x_noisy, t, cond, batched_number, transformer_options)
@@ -62,6 +67,15 @@ class ControlNetAdvanced(ControlNet, AdvancedControlBase):
         if self.manual_cast_dtype is not None:
             dtype = self.manual_cast_dtype
 
+        # Check if keyframe has changed - if so, invalidate cond_hint cache
+        current_kf_index = getattr(self, '_current_timestep_index', None)
+        if current_kf_index != getattr(self, '_last_used_kf_index', None):
+            print(f"[DEBUG] Keyframe changed from {getattr(self, '_last_used_kf_index', 'None')} to {current_kf_index} - invalidating cond_hint cache")
+            if self.cond_hint is not None:
+                del self.cond_hint
+            self.cond_hint = None
+            self._last_used_kf_index = current_kf_index
+
         # make cond_hint appropriate dimensions
         # TODO: change this to not require cond_hint upscaling every step when self.sub_idxs are present
         if self.sub_idxs is not None or self.cond_hint is None or x_noisy.shape[2] * self.real_compression_ratio != self.cond_hint.shape[2] or x_noisy.shape[3] * self.real_compression_ratio != self.cond_hint.shape[3]:
@@ -72,14 +86,43 @@ class ControlNetAdvanced(ControlNet, AdvancedControlBase):
             compression_ratio = self.compression_ratio
             if self.vae is not None and self.mult_by_ratio_when_vae:
                 compression_ratio *= self.vae.downscale_ratio
+            
+            # DEBUG: Check for per-keyframe image
+            print(f"[DEBUG] About to check for per-keyframe image...")
+            print(f"  hasattr(self, 'tk_cn_extras'): {hasattr(self, 'tk_cn_extras')}")
+            
+            if hasattr(self, 'tk_cn_extras'):
+                print(f"  self.tk_cn_extras: {self.tk_cn_extras}")
+                if self.tk_cn_extras is not None:
+                    print(f"  tk_cn_extras keys: {list(self.tk_cn_extras.keys())}")
+            
+            # Check for per-keyframe image in current timestep keyframe
+            # Use keyframe-specific image if available, otherwise use original
+            source_image = self.cond_hint_original
+            if hasattr(self, 'tk_cn_extras') and self.tk_cn_extras is not None and 'image' in self.tk_cn_extras:
+                source_image = self.tk_cn_extras['image']
+                print(f"[DEBUG] ✓ USING PER-KEYFRAME IMAGE! Shape: {source_image.shape}")
+                
+                # Ensure image is in NCHW format [N, C, H, W]
+                if len(source_image.shape) == 3:  # [H, W, C] format
+                    source_image = source_image.permute(2, 0, 1).unsqueeze(0)  # -> [1, C, H, W]
+                    print(f"[DEBUG] Converted HWC to NCHW: {source_image.shape}")
+                elif len(source_image.shape) == 4 and source_image.shape[-1] in [1, 3, 4]:
+                    # Likely [N, H, W, C], convert to [N, C, H, W]
+                    source_image = source_image.permute(0, 3, 1, 2)
+                    print(f"[DEBUG] Converted NHWC to NCHW: {source_image.shape}")
+            else:
+                print(f"[DEBUG] ✗ Using cond_hint_original (no per-keyframe image)")
+                print(f"  cond_hint_original shape: {self.cond_hint_original.shape}")
+            
             # if self.cond_hint_original length greater or equal to real latent count, subdivide it before scaling
             if self.sub_idxs is not None:
-                actual_cond_hint_orig = self.cond_hint_original
-                if self.cond_hint_original.size(0) < self.full_latent_length:
+                actual_cond_hint_orig = source_image
+                if source_image.size(0) < self.full_latent_length:
                     actual_cond_hint_orig = extend_to_batch_size(tensor=actual_cond_hint_orig, batch_size=self.full_latent_length)
                 self.cond_hint = comfy.utils.common_upscale(actual_cond_hint_orig[self.sub_idxs], x_noisy.shape[3] * compression_ratio, x_noisy.shape[2] * compression_ratio, self.upscale_algorithm, "center")
             else:
-                self.cond_hint = comfy.utils.common_upscale(self.cond_hint_original, x_noisy.shape[3] * compression_ratio, x_noisy.shape[2] * compression_ratio, self.upscale_algorithm, "center")
+                self.cond_hint = comfy.utils.common_upscale(source_image, x_noisy.shape[3] * compression_ratio, x_noisy.shape[2] * compression_ratio, self.upscale_algorithm, "center")
             self.cond_hint = self.preprocess_image(self.cond_hint)
             if self.vae is not None:
                 loaded_models = comfy.model_management.loaded_models(only_currently_used=True)
@@ -980,4 +1023,3 @@ def load_svdcontrolnet(ckpt_path: str, controlnet_data: dict[str, Tensor]=None, 
 
     control = SVDControlNetAdvanced(control_model, timestep_keyframes=timestep_keyframe, global_average_pooling=global_average_pooling, load_device=load_device, manual_cast_dtype=manual_cast_dtype)
     return control
-
